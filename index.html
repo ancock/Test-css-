@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Liquid Glass Voiceboard</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="stage">
+    <div class="bg-ambient"></div>
+
+    <header class="header">
+      <h1 class="logo">Liquid Glass — Voiceboard</h1>
+      <p class="subtitle">Modern · Futuristisch · Frosted glass UI</p>
+    </header>
+
+    <section class="card">
+      <div class="card-inner">
+        <h2>Neue Sprachnachricht</h2>
+
+        <div class="controls">
+          <label class="file-label">
+            <input id="fileInput" type="file" accept="audio/*" />
+            Datei hochladen
+          </label>
+
+          <div class="recorder">
+            <button id="recBtn" class="btn">Aufnahme starten</button>
+            <span id="recStatus" class="status">Nicht aufgenommen</span>
+          </div>
+        </div>
+
+        <div class="meta">
+          <input id="msgTitle" type="text" placeholder="Titel der Nachricht (z. B. 'Mathe-Hausaufg.')" />
+          <div class="actions">
+            <button id="saveBtn" class="btn primary" title="Hochgeladene oder aufgenommene Datei speichern">Speichern</button>
+            <button id="clearAllBtn" class="btn ghost" title="Alle lokal gespeicherten Nachrichten löschen">Alle löschen</button>
+          </div>
+        </div>
+
+        <p class="hint">Tipp: Du kannst direkt im Browser aufnehmen oder eine fertige Audiodatei hochladen. Nachrichten werden lokal im Browser gespeichert.</p>
+      </div>
+    </section>
+
+    <section class="card list-card">
+      <div class="card-inner">
+        <h2>Gespeicherte Nachrichten</h2>
+        <ul id="msgList" class="msg-list" aria-live="polite"></ul>
+        <p id="emptyMsg" class="empty">Noch keine Sprachnachrichten vorhanden.</p>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <small>Design inspiriert von Apple Liquid Glass · Lokale Speicherung</small>
+    </footer>
+  </main>
+
+  <script>
+  /* --------- App-Logik --------- */
+  const fileInput = document.getElementById('fileInput');
+  const recBtn = document.getElementById('recBtn');
+  const recStatus = document.getElementById('recStatus');
+  const saveBtn = document.getElementById('saveBtn');
+  const clearAllBtn = document.getElementById('clearAllBtn');
+  const msgTitle = document.getElementById('msgTitle');
+  const msgList = document.getElementById('msgList');
+  const emptyMsg = document.getElementById('emptyMsg');
+
+  let currentDataUrl = null;
+  let mediaRecorder = null;
+  let recordingChunks = [];
+  let isRecording = false;
+
+  const STORAGE_KEY = 'liquid_glass_voiceboard';
+
+  /* Hilfsfunktionen */
+  function loadSaved() {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    try {
+      return raw ? JSON.parse(raw) : [];
+    } catch(e) {
+      console.warn('Fehler beim Parsen von localStorage:', e);
+      return [];
+    }
+  }
+
+  function saveAll(arr) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(arr));
+  }
+
+  function renderList() {
+    const arr = loadSaved();
+    msgList.innerHTML = '';
+    if (arr.length === 0) {
+      emptyMsg.style.display = 'block';
+      return;
+    }
+    emptyMsg.style.display = 'none';
+
+    arr.slice().reverse().forEach(item => {
+      const li = document.createElement('li');
+      li.className = 'msg-item';
+      li.innerHTML = `
+        <div class="msg-meta">
+          <strong class="title">${escapeHtml(item.title || 'Unbenannt')}</strong>
+          <small class="date">${new Date(item.createdAt).toLocaleString()}</small>
+        </div>
+        <audio class="audio" controls src="${item.data}"></audio>
+        <div class="msg-actions">
+          <a class="btn small" download="${sanitizeFilename(item.title||'message')}.webm" href="${item.data}">Download</a>
+          <button class="btn small ghost delete-btn">Löschen</button>
+        </div>
+      `;
+      const delBtn = li.querySelector('.delete-btn');
+      delBtn.addEventListener('click', () => {
+        deleteMessage(item.id);
+      });
+      msgList.appendChild(li);
+    });
+  }
+
+  function deleteMessage(id) {
+    const arr = loadSaved().filter(m => m.id !== id);
+    saveAll(arr);
+    renderList();
+  }
+
+  function createId() {
+    return 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2,9);
+  }
+
+  function sanitizeFilename(name) {
+    return name.replace(/[^a-z0-9_\-\.]/ig,'_').slice(0,100);
+  }
+
+  function escapeHtml(s){
+    return String(s)
+      .replace(/&/g,'&amp;')
+      .replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;')
+      .replace(/'/g,'&#039;');
+  }
+
+  /* Upload */
+  fileInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (!file.type.startsWith('audio/')) {
+      alert('Bitte eine Audiodatei auswählen.');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      currentDataUrl = reader.result;
+      recStatus.textContent = 'Datei bereit zum Speichern';
+    };
+    reader.readAsDataURL(file);
+  });
+
+  /* Aufnahme (MediaRecorder) */
+  async function startRecording() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaRecorder = new MediaRecorder(stream);
+      recordingChunks = [];
+      mediaRecorder.ondataavailable = e => {
+        if (e.data && e.data.size) recordingChunks.push(e.data);
+      };
+      mediaRecorder.onstop = async () => {
+        const blob = new Blob(recordingChunks, { type: recordingChunks[0]?.type || 'audio/webm' });
+        const reader = new FileReader();
+        reader.onload = () => {
+          currentDataUrl = reader.result;
+          recStatus.textContent = 'Aufnahme bereit zum Speichern';
+        };
+        reader.readAsDataURL(blob);
+        stream.getTracks().forEach(t => t.stop());
+      };
+      mediaRecorder.start();
+      isRecording = true;
+      recBtn.textContent = 'Aufnahme stoppen';
+      recStatus.textContent = 'Aufnahme läuft…';
+    } catch (err) {
+      console.error(err);
+      alert('Konnte Mikrofon nicht öffnen. Erlaubnis erteilen oder Browser prüfen.');
+    }
+  }
+
+  function stopRecording() {
+    if (mediaRecorder && isRecording) {
+      mediaRecorder.stop();
+      isRecording = false;
+      recBtn.textContent = 'Aufnahme starten';
+    }
+  }
+
+  recBtn.addEventListener('click', () => {
+    if (!isRecording) startRecording();
+    else stopRecording();
+  });
+
+  /* Speichern */
+  saveBtn.addEventListener('click', () => {
+    if (!currentDataUrl) {
+      alert('Keine Audiodatei vorhanden. Bitte aufnehmen oder hochladen.');
+      return;
+    }
+    const arr = loadSaved();
+    const item = {
+      id: createId(),
+      title: (msgTitle.value || '').trim() || 'Unbenannte Nachricht',
+      data: currentDataUrl,
+      createdAt: Date.now()
+    };
+    arr.push(item);
+    saveAll(arr);
+    // Zurücksetzen UI
+    currentDataUrl = null;
+    fileInput.value = '';
+    msgTitle.value = '';
+    recStatus.textContent = 'Nicht aufgenommen';
+    renderList();
+  });
+
+  clearAllBtn.addEventListener('click', () => {
+    if (!confirm('Alle lokal gespeicherten Nachrichten löschen?')) return;
+    localStorage.removeItem(STORAGE_KEY);
+    renderList();
+  });
+
+  /* Initialisieren */
+  renderList();
+
+  </script>
+</body>
+</html>
